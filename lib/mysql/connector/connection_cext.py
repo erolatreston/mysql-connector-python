@@ -140,7 +140,7 @@ class CMySQLConnection(MySQLConnectionAbstract):
 
     def _open_connection(self):
         charset_name = CharacterSet.get_info(self._charset_id)[0]
-        self._cmysql = _mysql_connector.MySQL(  # pylint: disable=E1101
+        self._cmysql = _mysql_connector.MySQL(  # pylint: disable=E1101,I1101
             buffered=self._buffered,
             raw=self._raw,
             charset_name=charset_name,
@@ -161,10 +161,13 @@ class CMySQLConnection(MySQLConnectionAbstract):
 
         if self.isset_client_flag(ClientFlag.SSL):
             cnx_kwargs.update({
-                'ssl_ca': self._ssl['ca'],
-                'ssl_cert': self._ssl['cert'],
-                'ssl_key': self._ssl['key'],
-                'ssl_verify_cert': self._ssl['verify_cert']
+                'ssl_ca': self._ssl.get('ca'),
+                'ssl_cert': self._ssl.get('cert'),
+                'ssl_key': self._ssl.get('key'),
+                'ssl_verify_cert': self._ssl.get('verify_cert') or False,
+                'ssl_verify_identity':
+                    self._ssl.get('verify_identity') or False,
+                'ssl_disabled': self._ssl_disabled
             })
 
         try:

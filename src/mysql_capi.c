@@ -1,27 +1,32 @@
 /*
-# MySQL Connector/Python - MySQL driver written in Python.
-# Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
-
-# MySQL Connector/Python is licensed under the terms of the GPLv2
-# <http://www.gnu.org/licenses/old-licenses/gpl-2.0.html>, like most
-# MySQL Connectors. There are special exceptions to the terms and
-# conditions of the GPLv2 as it is applied to this software, see the
-# FOSS License Exception
-# <http://www.mysql.com/about/legal/licensing/foss-exception.html>.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
-*/
+ * Copyright (c) 2014, 2017, Oracle and/or its affiliates. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License, version 2.0, as
+ * published by the Free Software Foundation.
+ *
+ * This program is also distributed with certain software (including
+ * but not limited to OpenSSL) that is licensed under separate terms,
+ * as designated in a particular file or component or in included license
+ * documentation.  The authors of MySQL hereby grant you an
+ * additional permission to link the program and your derivative works
+ * with the separately licensed software that they have included with
+ * MySQL.
+ *
+ * Without limiting anything contained in the foregoing, this file,
+ * which is part of MySQL Connector/Python, is also subject to the
+ * Universal FOSS Exception, version 1.0, a copy of which can be found at
+ * http://oss.oracle.com/licenses/universal-foss-exception.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License, version 2.0, for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1031,7 +1036,7 @@ MySQL_connect(MySQL *self, PyObject *args, PyObject *kwds)
 {
 	char *host= NULL, *user= NULL, *database= NULL, *unix_socket= NULL;
 	char *ssl_ca= NULL, *ssl_cert= NULL, *ssl_key= NULL;
-	PyObject *charset_name, *compress, *ssl_verify_cert, *password;
+	PyObject *charset_name, *compress, *ssl_verify_cert, *ssl_verify_identity, *password, *ssl_disabled;
 	const char* auth_plugin;
 	unsigned long client_flags= 0;
 	unsigned int port= 3306, tmp_uint;
@@ -1039,29 +1044,36 @@ MySQL_connect(MySQL *self, PyObject *args, PyObject *kwds)
 #if MYSQL_VERSION_ID >= 50711
 	unsigned int ssl_mode;
 #endif
-	my_bool abool;
-	my_bool ssl_enabled= 0;
+#if MYSQL_VERSION_ID >= 80001
+	bool abool;
+	bool ssl_enabled= 0;
+#else
+  my_bool abool;
+  my_bool ssl_enabled= 0;
+#endif
 	MYSQL *res;
 
 	static char *kwlist[]=
 	{
 	    "host", "user", "password", "database",
 		"port", "unix_socket", "client_flags",
-		"ssl_ca", "ssl_cert", "ssl_key", "ssl_verify_cert",
+		"ssl_ca", "ssl_cert", "ssl_key", "ssl_verify_cert", "ssl_verify_identity", "ssl_disabled",
 		"compress",
 		NULL
     };
 
 #ifdef PY3
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|zzzzkzkzzzO!O!", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|zzzzkzkzzzO!O!O!O!", kwlist,
 #else
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|zzOzkzkzzzO!O!", kwlist,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|zzOzkzkzzzO!O!O!O!", kwlist,
 #endif
                                      &host, &user, &password, &database,
                                      &port, &unix_socket,
                                      &client_flags,
                                      &ssl_ca, &ssl_cert, &ssl_key,
                                      &PyBool_Type, &ssl_verify_cert,
+                                     &PyBool_Type, &ssl_verify_identity,
+                                     &PyBool_Type, &ssl_disabled,
                                      &PyBool_Type, &compress))
     {
         return NULL;
@@ -1135,17 +1147,26 @@ MySQL_connect(MySQL *self, PyObject *args, PyObject *kwds)
         if (ssl_verify_cert && ssl_verify_cert == Py_True)
         {
 #if MYSQL_VERSION_ID >= 50711
-            {
+            if (ssl_verify_identity && ssl_verify_identity == Py_True) {
                 ssl_mode= SSL_MODE_VERIFY_IDENTITY;
                 mysql_options(&self->session, MYSQL_OPT_SSL_MODE, &ssl_mode);
             }
 #else
-            {
-                abool= 1;
-                mysql_options(&self->session,
-                              MYSQL_OPT_SSL_VERIFY_SERVER_CERT, (char*)&abool);
+            abool= 1;
+#if MYSQL_VERSION_ID > 50703
+            mysql_options(&self->session, MYSQL_OPT_SSL_ENFORCE, (char*)&abool);
+#endif
+            mysql_options(&self->session,
+                          MYSQL_OPT_SSL_VERIFY_SERVER_CERT, (char*)&abool);
+#endif
+        } else {
+#if MYSQL_VERSION_ID >= 50711
+            if (ssl_verify_identity && ssl_verify_identity == Py_True) {
+                ssl_mode= SSL_MODE_VERIFY_IDENTITY;
+                mysql_options(&self->session, MYSQL_OPT_SSL_MODE, &ssl_mode);
             }
 #endif
+            ssl_ca= NULL;
         }
         mysql_ssl_set(&self->session, ssl_key, ssl_cert, ssl_ca, NULL, NULL);
     } else {
