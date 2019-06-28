@@ -4230,3 +4230,1254 @@ class BugOra21530841(tests.MySQLConnectorTests):
         cur.execute(query)
         cur.fetchone()
         cur.close()
+
+
+@unittest.skipIf(sys.version_info < (2, 7, 9),
+                 "Python 2.7.9+ is required for SSL")
+class BugOra25397650(tests.MySQLConnectorTests):
+    """BUG#25397650: CERTIFICATE VALIDITY NOT VERIFIED 
+    """
+    def setUp(self):
+        self.config = tests.get_mysql_config().copy()
+        self.config.pop('unix_socket')
+        self.config['host'] = 'localhost'
+        self.ca = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_CA_cert.pem'))
+        self.ca_1 = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_CA_cert_1.pem'))
+
+    def _verify_cert(self, config):
+        # Test with a bad CA
+        config['ssl_ca'] = self.ca_1
+        config['ssl_verify_cert'] = True
+        self.assertRaises(errors.InterfaceError,
+            mysql.connector.connect, **config)
+        config['ssl_verify_cert'] = False
+        mysql.connector.connect(**config)
+
+        # Test with the correct CA
+        config['ssl_ca'] = self.ca
+        config['ssl_verify_cert'] = True
+        mysql.connector.connect(**config)
+        config['ssl_verify_cert'] = False
+        mysql.connector.connect(**config)
+
+    def test_pure_verify_server_certifcate(self):
+        config = self.config.copy()
+        config['use_pure'] = True
+
+        self._verify_cert(config)
+
+    def test_cext_verify_server_certifcate(self):
+        config = self.config.copy()
+        config['use_pure'] = False
+
+        self._verify_cert(config)
+
+
+@unittest.skipIf(tests.MYSQL_VERSION < (5, 6, 39), "skip in older server")
+@unittest.skipIf(not CMySQLConnection, ERR_NO_CEXT)
+class Bug28133321(tests.MySQLConnectorTests):
+    """BUG#28133321: FIX INCORRECT COLUMNS NAMES REPRESENTING AGGREGATE
+    FUNCTIONS
+    """
+    tbl = "BUG28133321"
+
+    def setUp(self):
+        create_table = ("CREATE TABLE {} ("
+                        "  dish_id INT(11) UNSIGNED AUTO_INCREMENT UNIQUE KEY,"
+                        "  category TEXT,"
+                        "  dish_name TEXT,"
+                        "  price FLOAT,"
+                        "  servings INT,"
+                        "  order_time TIME) CHARACTER SET utf8"
+                        " COLLATE utf8_general_ci")
+        config = tests.get_mysql_config()
+        cnx = CMySQLConnection(**config)
+
+        try:
+            cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        except:
+            pass
+        cnx.cmd_query(create_table.format(self.tbl))
+
+        cur = cnx.cursor(dictionary=True)
+        insert_stmt = ('INSERT INTO {} ('
+                       '  category, dish_name, price, servings, order_time'
+                       ') VALUES ("{{}}", "{{}}", {{}}, {{}}, "{{}}")'
+                       ).format(self.tbl)
+        values = [("dinner", "lassanya", 10.53, "2", "00:10"),
+                  ("dinner", "hamburger", 9.35, "1", "00:15"),
+                  ("dinner", "hamburger whit fries", 10.99, "2", "00:20"),
+                  ("dinner", "Pizza", 9.99, "4", "00:30"),
+                  ("dessert", "cheescake", 4.95, "1", "00:05"),
+                  ("dessert", "cheescake special", 5.95, "2", "00:05")]
+
+        for value in values:
+            cur.execute(insert_stmt.format(*value))
+        cnx.close()
+
+    def tearDown(self):
+        config = tests.get_mysql_config()
+        cnx = CMySQLConnection(**config)
+        try:
+            cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        except:
+            pass
+        cnx.close()
+
+    def test_columns_name_are_not_bytearray(self):
+        sql_statement = ["SELECT",
+                         "  dish_id,",
+                         "  category,",
+                         "  JSON_OBJECTAGG(category, dish_name) as special,",
+                         "  JSON_ARRAYAGG(dish_name) as dishes,",
+                         "  GROUP_CONCAT(dish_name) as dishes2,",
+                         "  price,",
+                         "  servings,",
+                         "  ROUND(AVG(price)) AS round_avg_price,",
+                         "  AVG(price) AS avg_price,",
+                         "  MIN(price) AS min_price,",
+                         "  MAX(price) AS max_price,",
+                         "  MAX(order_time) AS preparation_time,",
+                         "  STD(servings) as deviation,",
+                         "  SUM(price) AS sum,",
+                         "  VARIANCE(price) AS var,",
+                         "  COUNT(DISTINCT servings) AS cd_servings,",
+                         "  COUNT(servings) AS c_servings ",
+                         "FROM {} ",
+                         "GROUP BY category"]
+        # Remove JSON functions when testing againsts server version < 5.7.22
+        # JSON_OBJECTAGG JSON_ARRAYAGG were introduced on 5.7.22
+        if tests.MYSQL_VERSION < (5, 7, 22):
+            sql_statement.pop(3)
+            sql_statement.pop(3)
+        sql_statement = "".join(sql_statement)
+        config = tests.get_mysql_config()
+        cnx = CMySQLConnection(**config)
+
+        cur = cnx.cursor(dictionary=True)
+        cur.execute(sql_statement.format(self.tbl))
+        rows = cur.fetchall()
+        col_names = [x[0] for x in cur.description]
+
+        for row in rows:
+            for col, val in row.items():
+                self.assertTrue(isinstance(col, STRING_TYPES),
+                                "The columns name {} is not a string type"
+                                "".format(col))
+                self.assertFalse(isinstance(col, (bytearray)),
+                                "The columns name {} is a bytearray type"
+                                "".format(col))
+                self.assertFalse(isinstance(val, (bytearray)),
+                                "The value {} of column {} is a bytearray type"
+                                "".format(val, col))
+
+        for col_name in col_names:
+            self.assertTrue(isinstance(col_name, STRING_TYPES),
+                            "The columns name {} is not a string type"
+                            "".format(col_name))
+            self.assertFalse(isinstance(col_name, (bytearray)),
+                            "The columns name {} is a bytearray type"
+                            "".format(col_name))
+
+
+class BugOra21947091(tests.MySQLConnectorTests):
+    """BUG#21947091: """
+    def setUp(self):
+        self.config = tests.get_mysql_config()
+        self.config.pop('unix_socket')
+        self.server = tests.MYSQL_SERVERS[0]
+
+    def _disable_ssl(self):
+        self.server.stop()
+        self.server.wait_down()
+
+        self.server.start(ssl_ca='', ssl_cert='', ssl_key='', ssl=0)
+        self.server.wait_up()
+        time.sleep(1)
+
+    def _enable_ssl(self):
+        self.server.stop()
+        self.server.wait_down()
+
+        self.server.start()
+        self.server.wait_up()
+        time.sleep(1)
+
+    def _verify_ssl(self, cnx, available=True):
+        cur = cnx.cursor()
+        cur.execute("SHOW STATUS LIKE 'Ssl_version'")
+        result = cur.fetchall()[0]
+        if available:
+            self.assertNotEqual(result[1], '')
+        else:
+            self.assertEqual(result[1], '')
+
+    def test_ssl_disabled_pure(self):
+        self.config['use_pure'] = True
+        self._test_ssl_modes()
+
+    def test_ssl_disabled_cext(self):
+        self.config['use_pure'] = False
+        self._test_ssl_modes()
+
+    def _test_ssl_modes(self):
+        config = self.config.copy()
+        # With SSL on server
+        # default
+        cnx = mysql.connector.connect(**config)
+        self._verify_ssl(cnx)
+
+        # disabled
+        config['ssl_disabled'] = True
+        cnx = mysql.connector.connect(**config)
+        self._verify_ssl(cnx, False)
+
+        self._disable_ssl()
+        config = self.config.copy()
+        config['ssl_ca'] = tests.SSL_CA
+        # Without SSL on server
+        try:
+            # default
+            cnx = mysql.connector.connect(**config)
+            self._verify_ssl(cnx, False)
+
+            # disabled
+            config['ssl_disabled'] = True
+            cnx = mysql.connector.connect(**config)
+            self._verify_ssl(cnx, False)
+
+        finally:
+            self._enable_ssl()
+
+
+class BugOra25589496(tests.MySQLConnectorTests):
+    """BUG#25589496: COMMITS RELATED TO "BUG22529828" BROKE BINARY DATA
+    HANDLING FOR PYTHON 2.7
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        self.cnx = connection.MySQLConnection(**config)
+        self.tbl = "Bug25589496"
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+
+    def tearDown(self):
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cnx.close()
+
+    def test_insert_binary(self):
+        table = """
+        CREATE TABLE {0} (
+            `id` int(10) unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            `section` VARCHAR(50) NOT NULL,
+            `pickled` LONGBLOB NOT NULL
+        )
+        """.format(self.tbl)
+        cursor = self.cnx.cursor()
+        cursor.execute(table)
+
+        pickled = pickle.dumps({'a': 'b'}, pickle.HIGHEST_PROTOCOL)
+        add_row_q = "INSERT INTO {0} (section, pickled) " \
+                    "VALUES (%(section)s, %(pickled)s)".format(self.tbl)
+
+        new_row = cursor.execute(add_row_q, {'section': 'foo',
+                                             'pickled': pickled})
+        self.cnx.commit()
+        self.assertEqual(1, cursor.lastrowid)
+        cursor.close()
+
+
+class BugOra25383644(tests.MySQLConnectorTests):
+    """BUG#25383644: LOST SERVER CONNECTION LEAKS POOLED CONNECTIONS
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        config["pool_size"] = 3
+        self.cnxpool = pooling.MySQLConnectionPool(**config)
+        self.mysql_server = tests.MYSQL_SERVERS[0]
+
+    def test_pool_exhaustion(self):
+        sql = "SELECT * FROM dummy"
+
+        i = 4
+        while i > 0:
+            cnx = self.cnxpool.get_connection()
+            cur = cnx.cursor()
+            try:
+                self.mysql_server.stop()
+                self.mysql_server.wait_down()
+                cur.execute(sql)
+            except (mysql.connector.errors.OperationalError,
+                    mysql.connector.errors.ProgrammingError):
+                try:
+                    cur.close()
+                    cnx.close()
+                except mysql.connector.errors.OperationalError:
+                    pass
+            finally:
+                i -= 1
+                if not self.mysql_server.check_running():
+                    self.mysql_server.start()
+                    self.mysql_server.wait_up()
+
+
+class BugOra25558885(tests.MySQLConnectorTests):
+    """BUG#25558885: ERROR 2013 (LOST CONNECTION TO MYSQL SERVER) USING C
+    EXTENSIONS
+    """
+    def setUp(self):
+        pass
+
+    def _long_query(self, config, cursor_class):
+        db_conn = mysql.connector.connect(**config)
+        cur = db_conn.cursor(cursor_class=cursor_class)
+        cur.execute("select sleep(15)")
+        cur.close()
+        db_conn.disconnect()
+
+    @unittest.skipIf(not CMySQLConnection, ERR_NO_CEXT)
+    def test_cext_cnx(self):
+        config = tests.get_mysql_config()
+        config["use_pure"] = False
+        del config["connection_timeout"]
+        cursor_class = mysql.connector.cursor_cext.CMySQLCursorBufferedRaw
+        self._long_query(config, cursor_class)
+
+    def test_pure_cnx(self):
+        config = tests.get_mysql_config()
+        config["use_pure"] = True
+        del config["connection_timeout"]
+        cursor_class = mysql.connector.cursor.MySQLCursorBufferedRaw
+        self._long_query(config, cursor_class)
+
+
+class BugOra20736339(tests.MySQLConnectorTests):
+    """BUG#20736339: C EXTENSION FAILS TO COMPILE IF MYSQL_CONFIG RETURN MORE
+    THAN ONE INCLUDE DIR
+    """
+    def test_parse_mysql_config(self):
+        options = ['cflags', 'include', 'libs', 'libs_r', 'plugindir', 'version']
+        includes = ["/mysql/include", "/mysql/another_include"]
+        config = """
+        -I/mysql/include -fabi-version=2 -fno-omit-frame-pointer
+        -I{0}
+        -L/mysql/lib -lmysqlclient -lpthread -lm -lrt -lssl -lcrypto -ldl
+        -L/mysql/lib -lmysqlclient -lpthread -lm -lrt -lssl -lcrypto -ldl
+        /mysql/lib/plugin
+        5.7.17
+        """
+
+        info = cpy_distutils.parse_mysql_config_info(options,
+            config.strip().format(includes[0]))
+        self.assertEqual(1, len(info["include"]))
+        self.assertEqual(includes[0], info["include"][0])
+
+        info = cpy_distutils.parse_mysql_config_info(options,
+            config.strip().format(" -I".join(includes)))
+        self.assertEqual(2, len(info["include"]))
+        self.assertEqual(includes[0], info["include"][0])
+        self.assertEqual(includes[1], info["include"][1])
+
+
+class BugOra22564149(tests.MySQLConnectorTests):
+    """BUG#22564149: CMD_QUERY_ITER ERRONEOUSLY CALLS ".ENCODE('UTF8')" ON
+    BYTESTRINGS
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        self.tbl = "BugOra22564149"
+        self.cnx = connection.MySQLConnection(**config)
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cnx.cmd_query("CREATE TABLE {0} (id INT, name VARCHAR(50))"
+                           "".format(self.tbl))
+
+    def tearDown(self):
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cnx.close()
+
+    def test_cmd_query_iter(self):
+        stmt = (u"SELECT 1; INSERT INTO {0} VALUES (1, 'João'),(2, 'André'); "
+                u"SELECT 3")
+        results = []
+        for result in self.cnx.cmd_query_iter(
+                stmt.format(self.tbl).encode("utf-8")):
+            results.append(result)
+            if "columns" in result:
+                results.append(self.cnx.get_rows())
+
+
+class BugOra24659561(tests.MySQLConnectorTests):
+    """BUG#24659561: LOOKUPERROR: UNKNOWN ENCODING: UTF8MB4
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        config["charset"] = "utf8mb4"
+        self.tbl = "BugOra24659561"
+        self.cnx = connection.MySQLConnection(**config)
+        self.cur = self.cnx.cursor()
+        self.cur.execute("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cur.execute("CREATE TABLE {0} (id INT, name VARCHAR(100))"
+                         "".format(self.tbl))
+
+    def tearDown(self):
+        self.cur.execute("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cur.close()
+
+    def test_executemany_utf8mb4(self):
+        self.cur.executemany(
+            "INSERT INTO {0} VALUES (%s, %s)".format(self.tbl),
+            [(1, "Nuno"), (2, "Amitabh"), (3, "Rafael")]
+        )
+
+
+@unittest.skipIf(not CMySQLConnection, ERR_NO_CEXT)
+class BugOra27991948(tests.MySQLConnectorTests):
+    """BUG#27991948: UNREAD_RESULT IS NOT UNSET AFTER INVOKE GET_ROWS ON C-EXT
+    """
+    test_sql_single_result = "show variables like '%port%'"
+    cnx_cext = None
+    cnx_cext_raw = None
+
+    def setUp(self):
+        config_cext = tests.get_mysql_config()
+        config_cext["use_pure"] = False
+        self.cnx_cext = mysql.connector.connect(**config_cext)
+
+    def tearDown(self):
+        self.cnx_cext.close()
+
+    def test_automatically_set_of_unread_rows(self):
+        """Test unread_rows is automatically set after fetchall()"""
+        # Test get all the rows and execute a query without invoke free_result
+        self.cnx_cext.cmd_query(self.test_sql_single_result)
+        unread_result = self.cnx_cext.unread_result
+        self.assertTrue(unread_result, "unread_rows is expected to be True")
+        _ = self.cnx_cext.get_rows()
+        unread_result = self.cnx_cext.unread_result
+        self.assertFalse(unread_result, "unread_rows was not set to False")
+        # Query execution must not raise InternalError: Unread result found
+        self.cnx_cext.cmd_query(self.test_sql_single_result)
+        _ = self.cnx_cext.get_rows()
+
+        # Test cursor fetchall
+        cur_cext = self.cnx_cext.cursor()
+        cur_cext.execute(self.test_sql_single_result)
+        unread_result = self.cnx_cext.unread_result
+        self.assertTrue(unread_result, "unread_rows is expected to be True")
+        _ = cur_cext.fetchall()
+        unread_result = self.cnx_cext.unread_result
+        self.assertFalse(unread_result, "unread_rows was not set to False")
+        # Query execution must not raise InternalError: Unread result found
+        cur_cext.execute(self.test_sql_single_result)
+        _ = cur_cext.fetchall()
+
+        cur_cext.close()
+
+@unittest.skipIf(tests.MYSQL_VERSION < (8, 0, 1),
+                 "Collation utf8mb4_0900_ai_ci not available on 5.7.x")
+class BugOra27277964(tests.MySQLConnectorTests):
+    """BUG#27277964: NEW UTF8MB4 COLLATIONS NOT SUPPORTED
+    """
+    def setUp(self):
+        config = tests.get_mysql_config()
+        config["charset"] = "utf8mb4"
+        config["collation"] = "utf8mb4_0900_ai_ci"
+        self.tbl = "BugOra27277964"
+        self.cnx = connection.MySQLConnection(**config)
+        self.cur = self.cnx.cursor()
+        self.cur.execute("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cur.execute("CREATE TABLE {0} (id INT, name VARCHAR(100))"
+                         "".format(self.tbl))
+
+    def tearDown(self):
+        self.cur.execute("DROP TABLE IF EXISTS {0}".format(self.tbl))
+        self.cur.close()
+
+    def test_execute_utf8mb4_collation(self):
+        self.cur.execute("INSERT INTO {0} VALUES (1, 'Nuno')".format(self.tbl))
+
+
+@unittest.skipIf(tests.MYSQL_VERSION < (5, 7, 8),
+                 "Support for native JSON data types introduced on 5.7.8 ")
+class BugOra24948186(tests.MySQLConnectorTests):
+    """BUG#24948186: MySQL JSON TYPES RETURNED AS BYTES INSTEAD OF PYTHON TYPES
+    """
+    def setUp(self):
+        pass
+
+    def tearDown(self):
+        pass
+
+    def run_test_mysql_json_type(self, stm, test_values, expected_values,
+                                 mysql_type, expected_type):
+        config = tests.get_mysql_config()
+        config['charset'] = "utf8"
+        config['use_unicode'] = True
+        cnx = connection.MySQLConnection(**config)
+        cur = cnx.cursor()
+
+        for test_value, expected_value in zip(test_values, expected_values):
+            cur.execute(stm.format(value=test_value))
+            row = cur.fetchall()[0]
+            self.assertEqual(row[0], expected_value) #,"value is not the expected")
+            self.assertTrue(isinstance(row[0], expected_type),
+                            u"value {} is not python type {}"
+                            u"".format(row[0], expected_type))
+            self.assertEqual(row[1], mysql_type,
+                             u"value {} is mysql type {} but expected {}"
+                             u"".format(row[0], row[1], mysql_type))
+        cur.close()
+        cnx.close()
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_boolean(self):
+        stm = ("SELECT j, JSON_TYPE(j)"
+               "from (SELECT CAST({value} AS JSON) as J) jdata")
+        test_values = ["true", "false"]
+        expected_values = [True, False]
+        mysql_type = "BOOLEAN"
+        expected_type = bool
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_integer(self):
+        stm = ("SELECT j->>'$.foo', JSON_TYPE(j->>'$.foo')"
+               "FROM (SELECT json_object('foo', {value}) AS j) jdata")
+        test_values = [-2147483648, -1, 0, 1, 2147483647]
+        expected_values = test_values
+        mysql_type = "INTEGER"
+        expected_type = int
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+        test_values = [-9223372036854775808]
+        expected_values = test_values
+        mysql_type = "INTEGER"
+        if PY2 and os.name == 'nt':
+            expected_type = long
+        else:
+            expected_type = int
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+        test_values = [92233720368547760]
+        expected_values = test_values
+        mysql_type = "UNSIGNED INTEGER"
+        if PY2 and os.name == 'nt':
+            expected_type = long
+        else:
+            expected_type = int
+        self.run_test_mysql_json_type(stm, test_values,
+                                      expected_values,
+                                      mysql_type, expected_type)
+
+        test_values = [18446744073709551615]
+        expected_values = test_values
+        mysql_type = "UNSIGNED INTEGER"
+        if PY2:
+            expected_type = long
+        else:
+            expected_type = int
+        self.run_test_mysql_json_type(stm, test_values,
+                                      expected_values,
+                                      mysql_type, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_double(self):
+        # Because floating-point values are approximate and not stored as exact
+        # values the test values are not the true maximun or minum values
+        stm = ("SELECT j->>'$.foo', JSON_TYPE(j->>'$.foo')"
+               "FROM (SELECT json_object('foo', {value}) AS j) jdata")
+        test_values = [-12345.555, -1.55, 1.55, 12345.555]
+        expected_values = test_values
+        mysql_type = "DOUBLE"
+        expected_type = float
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_string(self):
+        stm = (u"SELECT j->>'$.foo', JSON_TYPE(j->>'$.foo')"
+               u"FROM (SELECT json_object('foo', {value}) AS j) jdata")
+        test_values = ['\'" "\'', '\'"some text"\'', u'\'"データベース"\'']
+        expected_values = ['" "', '"some text"', u'"データベース"']
+        mysql_type = "STRING"
+        expected_type = STRING_TYPES
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_datetime_types(self):
+        stm = ("SELECT j, JSON_TYPE(j)"
+               "from (SELECT CAST({value} AS JSON) as J) jdata")
+        test_values = ["cast('1972-01-01 00:42:49.000000' as DATETIME)",
+                       "cast('2018-01-01 23:59:59.000000' as DATETIME)"]
+        expected_values = [datetime(1972, 1, 1, 0, 42, 49),
+                           datetime(2018, 1, 1, 23, 59, 59)]
+        mysql_type = "DATETIME"
+        expected_type = datetime
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_date_types(self):
+        stm = ("SELECT j, JSON_TYPE(j)"
+               "from (SELECT CAST({value} AS JSON) as J) jdata")
+        test_values = ["DATE('1972-01-01')",
+                       "DATE('2018-12-31')"]
+        expected_values = [date(1972, 1, 1),
+                           date(2018, 12, 31)]
+        mysql_type = "DATE"
+        expected_type = date
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_mysql_json_time_types(self):
+        stm = ("SELECT j, JSON_TYPE(j)"
+               "from (SELECT CAST({value} AS JSON) as J) jdata")
+        test_values = ["TIME('00:42:49.000000')",
+                       "TIME('23:59:59.000001')"]
+        expected_values = [timedelta(hours=0, minutes=42, seconds=49),
+                           timedelta(hours=23, minutes=59, seconds=59,
+                                     microseconds=1)]
+        mysql_type = "TIME"
+        expected_type = timedelta
+        self.run_test_mysql_json_type(stm, test_values, expected_values,
+                                      mysql_type, expected_type)
+
+
+@unittest.skipIf(tests.MYSQL_VERSION < (8, 0, 11),
+                 "Not support for TLSv1.2 or not available by default")
+class Bug26484601(tests.MySQLConnectorTests):
+    """UNABLE TO CONNECT TO A MYSQL SERVER USING TLSV1.2"""
+
+    def try_connect(self, tls_version, expected_ssl_version):
+        config = tests.get_mysql_config().copy()
+        config['ssl_version'] = tls_version
+        config['ssl_ca'] = ''
+        cnx = connection.MySQLConnection(**config)
+        query = "SHOW STATUS LIKE 'ssl_version%'"
+        cur = cnx.cursor()
+        cur.execute(query)
+        res = cur.fetchall()
+        
+        if isinstance(expected_ssl_version, tuple):
+            msg = ("Not using the expected or greater TLS version: {}, instead"
+                   " the connection used: {}.")
+            # Get the version as tuple
+            server_tls = tuple([int(d) for d in
+                                (res[0][1].split('v')[1].split("."))])
+            self.assertGreaterEqual(server_tls, expected_ssl_version,
+                                    msg.format(expected_ssl_version, res))
+        else:
+            msg = ("Not using the expected TLS version: {}, instead the "
+                   "connection used: {}.")
+            self.assertEqual(res[0][1], expected_ssl_version,
+                             msg.format(expected_ssl_version, res))
+
+    def test_get_connection_using_given_TLS_version(self):
+        """Test connect using the given TLS version
+
+        The system variable tls_version determines which protocols the
+        server is permitted to use from those that are available (note#3).
+        +---------------+-----------------------+
+        | Variable_name | Value                 |
+        +---------------+-----------------------+
+        | tls_version   | TLSv1,TLSv1.1,TLSv1.2 |
+        +---------------+-----------------------+
+
+        To restrict and permit only connections with a specific version, the
+        variable can be set with those specific versions that will be allowed,
+        changing the configuration file.
+
+        [mysqld]
+        tls_version=TLSv1.1,TLSv1.2
+
+        This test will take adventage of the fact that the connector can
+        request to use a defined version of TLS to test that the connector can
+        connect to the server using such version instead of changing the
+        configuration of the server that will imply the stoping and restarting
+        of the server incrementing the time to run the test. In addition the
+        test relay in the default value of the 'tls_version' variable is set to
+        'TLSv1,TLSv1.1,TLSv1.2' (note#2).
+
+        On this test a connection will be
+        attempted forcing to use a determined version of TLS, (all of them
+        must be successfully) finally making sure that the connection was done
+        using the given TLS_version using the ssl.version() method (note#3).
+
+        Notes:
+        1.- tls_version is only available on MySQL 5.7
+        2.- 5.6.39 does not support TLSv1.2 so for test will be skip. Currently
+            in 5.7.21 is set to default values TLSv1,TLSv1.1,TLSv1.2 same as in
+            8.0.11+. This test will be only run in such versions and above.
+        3.- The ssl.version() method returns the version of tls used in during
+            the connection, however the version returned using ssl.cipher() is
+            not correct on windows, only indicates the newer version supported.
+
+        """
+        for tls_v_name, tls_version in TLS_VERSIONS.items():
+            self.try_connect(tls_version, tls_v_name)
+
+    def test_get_connection_using_servers_TLS_version(self):
+        """Test connect using the servers default TLS version
+
+        The TLS version used during the secured connection is chosen by the
+        server at the time the ssl handshake is made if the connector does not
+        specifies any specific version to use. The default value of the
+        ssl_version is None, however this only mean to the connector that none
+        specific version will be chosen by the server when the ssl handshake
+        occurs.
+        """
+        # The default value for the connector 'ssl_version' is None
+        # For the expected version, the server will use the latest version of
+        # TLS available "TLSv1.2" or newer.
+        tls_version = None
+        self.try_connect(tls_version, (1, 2))
+
+
+@unittest.skipIf(not CMySQLConnection, ERR_NO_CEXT)
+class BugOra27650437(tests.MySQLConnectorTests):
+    """BUG#27650437: DIFFERENCES PYTHON AND C-EXT FOR GET_ROW()/GET_ROWS()
+    """
+    test_sql_single_result = "show variables like '%port%'"
+    cnx_pure = None
+    cnx_cext = None
+    cnx_pure_raw = None
+    cnx_cext_raw = None
+
+    def setUp(self):
+        config_pure = tests.get_mysql_config()
+        config_pure["use_pure"] = True
+        self.cnx_pure = mysql.connector.connect(**config_pure)
+
+        config_cext = tests.get_mysql_config()
+        config_cext["use_pure"] = False
+        self.cnx_cext = mysql.connector.connect(**config_cext)
+
+        config_pure_raw = tests.get_mysql_config()
+        config_pure_raw["use_pure"] = True
+        config_pure_raw["raw"] = True
+        self.cnx_pure_raw = mysql.connector.connect(**config_pure_raw)
+
+        config_cext_raw = tests.get_mysql_config()
+        config_cext_raw["use_pure"] = False
+        config_cext_raw["raw"] = True
+        self.cnx_cext_raw = mysql.connector.connect(**config_cext_raw)
+
+    def tearDown(self):
+        self.cnx_pure.close()
+        self.cnx_cext.close()
+        self.cnx_pure_raw.close()
+        self.cnx_cext_raw.close()
+
+    def test_get_row(self):
+        """Test result from get_row is the same in pure and using c-ext"""
+        self.cnx_pure.cmd_query(self.test_sql_single_result)
+        res_pure = self.cnx_pure.get_row()
+
+        self.cnx_cext.cmd_query(self.test_sql_single_result)
+        res_cext = self.cnx_cext.get_row()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def test_get_rows(self):
+        """Test results from get_rows are the same in pure and using c-ext"""
+        self.cnx_pure.cmd_query(self.test_sql_single_result)
+        res_pure = self.cnx_pure.get_rows()
+
+        self.cnx_cext.cmd_query(self.test_sql_single_result)
+        res_cext = self.cnx_cext.get_rows()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def test_get_row_raw(self):
+        """Test result from get_row is the same in pure and using c-ext"""
+        self.cnx_pure_raw.cmd_query(self.test_sql_single_result)
+        res_pure = self.cnx_pure_raw.get_row()
+
+        self.cnx_cext_raw.cmd_query(self.test_sql_single_result)
+        res_cext = self.cnx_cext_raw.get_row()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def test_get_rows_raw(self):
+        """Test results from get_rows are the same in pure and using c-ext"""
+        self.cnx_pure_raw.cmd_query(self.test_sql_single_result)
+        res_pure = self.cnx_pure_raw.get_rows()
+
+        self.cnx_cext_raw.cmd_query(self.test_sql_single_result)
+        res_cext = self.cnx_cext_raw.get_rows()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def _test_fetchone(self, cur_pure, cur_cext):
+        """Test result from fetchone is the same in pure and using c-ext"""
+        cur_pure.execute(self.test_sql_single_result)
+        res_pure = cur_pure.fetchone()
+        _ = cur_pure.fetchall()
+
+        cur_cext.execute(self.test_sql_single_result)
+        res_cext = cur_cext.fetchone()
+        _ = cur_cext.fetchall()
+        self.cnx_cext.free_result()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def _test_fetchmany(self, cur_pure, cur_cext):
+        """Test results from fetchmany are the same in pure and using c-ext"""
+        cur_pure.execute(self.test_sql_single_result)
+        res_pure = cur_pure.fetchmany()
+
+        cur_cext.execute(self.test_sql_single_result)
+        res_cext = cur_cext.fetchmany()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+        res_pure = cur_pure.fetchmany(2)
+        res_cext = cur_cext.fetchmany(2)
+
+        _ = cur_pure.fetchall()
+        _ = cur_cext.fetchall()
+        self.cnx_cext.free_result()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def _test_fetch_fetchall(self, cur_pure, cur_cext):
+        """Test results from fetchall are the same in pure and using c-ext"""
+        cur_pure.execute(self.test_sql_single_result)
+        res_pure = cur_pure.fetchall()
+
+        cur_cext.execute(self.test_sql_single_result)
+        res_cext = cur_cext.fetchall()
+
+        self.cnx_cext.free_result()
+
+        self.assertEqual(res_pure, res_cext, "Result using pure: {} differs"
+                         "from c-ext result {}".format(res_pure, res_cext))
+
+    def test_cursor(self):
+        """Test results from cursor are the same in pure and using c-ext"""
+        cur_pure = self.cnx_pure.cursor()
+        cur_cext = self.cnx_cext.cursor()
+        self._test_fetchone(cur_pure, cur_cext)
+        self._test_fetchmany(cur_pure, cur_cext)
+        self._test_fetch_fetchall(cur_pure, cur_cext)
+        cur_pure.close()
+        cur_cext.close()
+
+    def test_cursor_raw(self):
+        """Test results from cursor raw are the same in pure and using c-ext"""
+        raw = True
+        cur_pure_raw = self.cnx_pure.cursor(raw=raw)
+        cur_cext_raw = self.cnx_cext.cursor(raw=raw)
+        self._test_fetchone(cur_pure_raw, cur_cext_raw)
+        self._test_fetchmany(cur_pure_raw, cur_cext_raw)
+        self._test_fetch_fetchall(cur_pure_raw, cur_cext_raw)
+        cur_pure_raw.close()
+        cur_cext_raw.close()
+
+    def test_cursor_buffered(self):
+        """Test results from cursor buffered are the same in pure or c-ext"""
+        buffered = True
+        cur_pure_buffered = self.cnx_pure.cursor(buffered=buffered)
+        cur_cext_buffered = self.cnx_cext.cursor(buffered=buffered)
+        self._test_fetchone(cur_pure_buffered, cur_cext_buffered)
+        self._test_fetchmany(cur_pure_buffered, cur_cext_buffered)
+        self._test_fetch_fetchall(cur_pure_buffered, cur_cext_buffered)
+        cur_pure_buffered.close()
+        cur_cext_buffered.close()
+
+    def test_cursor_dictionary(self):
+        """Test results from cursor buffered are the same in pure or c-ext"""
+        cur_pure_dictionary = self.cnx_pure.cursor(dictionary=True)
+        cur_cext_dictionary = self.cnx_cext.cursor(dictionary=True)
+        self._test_fetchone(cur_pure_dictionary, cur_cext_dictionary)
+        self._test_fetchmany(cur_pure_dictionary, cur_cext_dictionary)
+        self._test_fetch_fetchall(cur_pure_dictionary, cur_cext_dictionary)
+        cur_pure_dictionary.close()
+        cur_cext_dictionary.close()
+
+    def test_cursor_dictionary_buf(self):
+        """Test results from cursor buffered are the same in pure or c-ext"""
+        cur_pure = self.cnx_pure.cursor(dictionary=True,
+                                                   buffered=True)
+        cur_cext = self.cnx_cext.cursor(dictionary=True,
+                                                   buffered=True)
+        self._test_fetchone(cur_pure, cur_cext)
+        self._test_fetchmany(cur_pure, cur_cext)
+        self._test_fetch_fetchall(cur_pure, cur_cext)
+        cur_pure.close()
+        cur_cext.close()
+
+
+class BugOra28239074(tests.MySQLConnectorTests):
+    """BUG#28239074: CURSOR DICTIONARY DOES NOT RETURN DICTIONARY TYPE RESULTS
+    """
+    table = "bug28239074"
+
+    def setUp(self):
+        config_pure = tests.get_mysql_config()
+        config_pure["use_pure"] = True
+        self.cnx = mysql.connector.connect(**config_pure)
+        cur = self.cnx.cursor(dictionary=True)
+
+        cur.execute("DROP TABLE IF EXISTS {0}".format(self.table))
+        cur.execute("CREATE TABLE {0}(a char(50) ,b int) "
+                                    "DEFAULT CHARSET utf8".format(self.table))
+        data = [(chr(1), 1),('s', 2),(chr(120), 3),(chr(121), 4),(chr(127), 5)]
+        cur.executemany("INSERT INTO {0} (a, b) VALUES "
+                                        "(%s, %s)".format(self.table), data)
+
+    def tearDown(self):
+        self.cnx.cmd_query("DROP TABLE IF EXISTS {}".format(self.table))
+        self.cnx.close()
+
+    def test_cursor_dict(self):
+        exp = [
+            {u'a': u'\x01', u'b': 1},
+            {u'a': u's', u'b': 2},
+            {u'a': u'\x78', u'b': 3},
+            {u'a': u'\x79', u'b': 4},
+            {u'a': u'\x7f', u'b': 5}
+        ]
+        cur = self.cnx.cursor(dictionary=True)
+
+        # Test fetchone
+        cur.execute("SELECT * FROM {}".format(self.table))
+        i = 0
+        row = cur.fetchone()
+        while row is not None:
+            self.assertTrue(isinstance(row, dict))
+            self.assertEqual(exp[i], row, "row {} is not equal to expected row"
+                             " {}".format(row, exp[i]))
+            row = cur.fetchone()
+            i += 1
+
+        # Test fetchall
+        cur.execute("SELECT * FROM {}".format(self.table))
+        rows = cur.fetchall()
+        self.assertEqual(exp, rows, "rows {} is not equal to expected row")
+
+        # Test for each in cursor
+        cur.execute("SELECT * FROM {}".format(self.table))
+        i = 0
+        for row in cur:
+            self.assertTrue(isinstance(row, dict))
+            self.assertEqual(exp[i], row, "row {} is not equal to expected row"
+                             " {}".format(row, exp[i]))
+            i += 1
+
+
+class BugOra27364914(tests.MySQLConnectorTests):
+    """BUG#27364914: CURSOR PREPARED STATEMENTS DO NOT CONVERT STRINGS
+    """
+    charsets_list = ('gbk', 'sjis', 'big5', 'utf8', 'utf8mb4', 'latin1')
+
+    def setUp(self):
+        cnx = connection.MySQLConnection(**tests.get_mysql_config())
+        cur = cnx.cursor(cursor_class=cursor.MySQLCursorPrepared)
+
+        for charset in self.charsets_list:
+            tablename = '{0}_ps_test'.format(charset)
+            cur.execute("DROP TABLE IF EXISTS {0}".format(tablename))
+            table = (
+                "CREATE TABLE {table} ("
+                "  id INT AUTO_INCREMENT KEY,"
+                "  c1 VARCHAR(40),"
+                "  val2 datetime"
+                ") CHARACTER SET '{charset}'"
+            ).format(table=tablename, charset=charset)
+            cur.execute(table)
+            cnx.commit()
+        cur.close()
+        cnx.close()
+
+    def tearDown(self):
+        cnx = connection.MySQLConnection(**tests.get_mysql_config())
+        for charset in self.charsets_list:
+            tablename = '{0}_ps_test'.format(charset)
+            cnx.cmd_query("DROP TABLE IF EXISTS {0}".format(tablename))
+        cnx.close()
+
+    def _test_charset(self, charset, data):
+        config = tests.get_mysql_config()
+        config['charset'] = charset
+        config['use_unicode'] = True
+        self.cnx = connection.MySQLConnection(**tests.get_mysql_config())
+        cur = self.cnx.cursor(cursor_class=cursor.MySQLCursorPrepared)
+
+        tablename = '{0}_ps_test'.format(charset)
+        cur.execute("TRUNCATE {0}".format(tablename))
+        self.cnx.commit()
+
+        insert = "INSERT INTO {0} (c1) VALUES (%s)".format(tablename)
+        for value in data:
+            cur.execute(insert, (value,))
+        self.cnx.commit()
+
+        cur.execute("SELECT id, c1 FROM {0} ORDER BY id".format(tablename))
+        for row in cur:
+            self.assertTrue(isinstance(row[1], STRING_TYPES),
+                            "The value is expected to be a string")
+            self.assertEqual(data[row[0] - 1], row[1])
+
+        cur.close()
+        self.cnx.close()
+
+    @foreach_cnx()
+    def test_cursor_prepared_statement_with_charset_gbk(self):
+        self._test_charset('gbk', [u'赵孟頫', u'赵\孟\頫\\', u'遜'])
+
+    @foreach_cnx()
+    def test_cursor_prepared_statement_with_charset_sjis(self):
+        self._test_charset('sjis', ['\u005c'])
+
+    @foreach_cnx()
+    def test_cursor_prepared_statement_with_charset_big5(self):
+        self._test_charset('big5', ['\u5C62'])
+
+    @foreach_cnx()
+    def test_cursor_prepared_statement_with_charset_utf8mb4(self):
+        self._test_charset('utf8mb4', ['\u5C62'])
+
+    @foreach_cnx()
+    def test_cursor_prepared_statement_with_charset_utf8(self):
+        self._test_charset('utf8', [u'データベース', u'데이터베이스'])
+
+    @foreach_cnx()
+    def test_cursor_prepared_statement_with_charset_latin1(self):
+        self._test_charset('latin1', [u'ñ', u'Ñ'])
+
+
+class BugOra27802700(tests.MySQLConnectorTests):
+    """BUG#27802700: A BYTEARRAY IS RETURNED FROM USING get_rows METHOD
+    """
+    table_name = "BugOra27802700"
+    insert_stmt = u"INSERT INTO {} ({}) values ({{value}})"
+
+    def setUp(self):
+        config = tests.get_mysql_config()
+        config['charset'] = "utf8"
+        config['use_unicode'] = True
+        cnx = connection.MySQLConnection(**config)
+        cur = cnx.cursor()
+        cur.execute("DROP TABLE IF EXISTS {}".format(self.table_name))
+        cur.execute("CREATE TABLE IF NOT EXISTS {} ("
+                    "  id INT(11) UNSIGNED AUTO_INCREMENT UNIQUE KEY,"
+                    "  int_long INT,"
+                    "  time TIME,"
+                    "  date DATE,"
+                    "  datetime DATETIME,"
+                    "  str TEXT) CHARACTER SET utf8"
+                    "  COLLATE utf8_general_ci".format(self.table_name))
+
+    def tearDown(self):
+        config = tests.get_mysql_config()
+        cnx = connection.MySQLConnection(**config)
+        cur = cnx.cursor()
+        try:
+            cur.execute("DROP TABLE IF EXISTS {}".format(self.table_name))
+        except:
+            pass
+
+    def run_test_retrieve_stored_type(self, stm, test_values, expected_values,
+                                      column, expected_type):
+        config = tests.get_mysql_config()
+        config['charset'] = "utf8"
+        config['use_unicode'] = True
+        config['autocommit'] = True
+        cnx = connection.MySQLConnection(**config)
+        cur = cnx.cursor()
+
+        for test_value in test_values:
+            cnx.cmd_query(stm.format(value=test_value))
+
+        qry = "SELECT {column} FROM {table} ORDER BY id"
+        cur.execute(qry.format(column=column, table=self.table_name))
+
+        rows = cnx.get_rows()[0][len(test_values) * (-1):]
+        for returned_val, expected_value in zip(rows, expected_values):
+            self.assertEqual(returned_val[0], expected_value,
+                             u"value {} is not the expected {}."
+                             u"".format(returned_val[0], expected_value))
+            self.assertTrue(isinstance(returned_val[0], expected_type),
+                            u"value {} is not python type {},"
+                            u"instead found a type {}"
+                            u"".format(returned_val, expected_type,
+                                       type(returned_val)))
+
+        cur.close()
+        cnx.close()
+
+    @foreach_cnx()
+    def test_retrieve_stored_int_long(self):
+        column = "int_long"
+        stm = self.insert_stmt.format(self.table_name, column)
+        test_values = ["-12345", "0", "12345"]
+        expected_values = [-12345, 0, 12345]
+
+        if PY2:
+            expected_type = (int, long)
+        else:
+            expected_type = (int)
+        self.run_test_retrieve_stored_type(stm, test_values, expected_values,
+                                           column, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_stored_str(self):
+        column = "str"
+        stm = self.insert_stmt.format(self.table_name, column)
+        test_values = ['\' \'', '\'some text\'', u'\'データベース\'',
+                       '"12345"']
+        expected_values = [' ', 'some text', u'データベース', "12345"]
+        expected_type = STRING_TYPES
+
+        self.run_test_retrieve_stored_type(stm, test_values, expected_values,
+                                           column, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_stored_datetime_types(self):
+        column = "datetime"
+        stm = self.insert_stmt.format(self.table_name, column)
+        test_values = ["cast('1972-01-01 00:42:49.000000' as DATETIME)",
+                       "cast('2018-01-01 23:59:59.000000' as DATETIME)"]
+        expected_values = [datetime(1972, 1, 1, 0, 42, 49),
+                           datetime(2018, 1, 1, 23, 59, 59)]
+
+        expected_type = datetime
+        self.run_test_retrieve_stored_type(stm, test_values, expected_values,
+                                           column, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_stored_date_types(self):
+        column = "date"
+        stm = self.insert_stmt.format(self.table_name, column)
+        test_values = ["DATE('1972-01-01')",
+                       "DATE('2018-12-31')"]
+        expected_values = [date(1972, 1, 1),
+                           date(2018, 12, 31)]
+
+        expected_type = date
+        self.run_test_retrieve_stored_type(stm, test_values, expected_values,
+                                           column, expected_type)
+
+    @foreach_cnx()
+    def test_retrieve_stored_time_types(self):
+        column = "time"
+        stm = self.insert_stmt.format(self.table_name, column)
+        test_values = ["TIME('00:42:49.00000')",
+                       "TIME('23:59:59.00000')"]
+        expected_values = [timedelta(hours=0, minutes=42, seconds=49),
+                           timedelta(hours=23, minutes=59, seconds=59)]
+        expected_type = timedelta
+        self.run_test_retrieve_stored_type(stm, test_values, expected_values,
+                                           column, expected_type)
+
+
+class BugOra27277937(tests.MySQLConnectorTests):
+    """BUG#27277937: CONFUSING ERROR MESSAGE WHEN SPECIFYING UNSUPPORTED
+    COLLATION
+    """
+    def setUp(self):
+        pass
+
+    def test_invalid_collation(self):
+        config = tests.get_mysql_config()
+        config["charset"] = "utf8"
+        config["collation"] = "foobar"
+        self.cnx = connection.MySQLConnection()
+        try:
+            self.cnx.connect(**config)
+        except errors.ProgrammingError as err:
+            self.assertEqual(err.msg, "Collation 'foobar' unknown.")
+        else:
+            self.fail("A ProgrammingError was expected")
+
+    def tearDown(self):
+        pass
+
+
+class BugOra28188883(tests.MySQLConnectorTests):
+    """BUG#27277937: DEPRECATED UTF8 IS THE DEFAULT CHARACTER SET IN 8.0
+    """
+    def setUp(self):
+        # Remove charset from the connection configuration if is set, so the
+        # default charset 'utf8mb4' is used for each connection
+        self.config = tests.get_mysql_config().copy()
+        if "charset" in self.config:
+            del self.config
+
+    @foreach_cnx()
+    def test_utf8mb4_default_charset(self):
+        self.assertEqual(self.cnx.charset, "utf8mb4")
+        data = [(1, u'🐬'), (2, u'🐍'), (3, u'🐶')]
+        tbl = "BugOra28188883"
+        cur = self.cnx.cursor()
+        cur.execute("DROP TABLE IF EXISTS {0}".format(tbl))
+        cur.execute("CREATE TABLE {0} (id INT, name VARCHAR(100)) "
+                    "DEFAULT CHARSET utf8mb4".format(tbl))
+        stmt = "INSERT INTO {0} (id, name) VALUES (%s, %s)".format(tbl)
+        cur.executemany(stmt, data)
+        cur.execute("SELECT id, name FROM {0}".format(tbl))
+        self.assertEqual(data, cur.fetchall())
+        cur.execute("DROP TABLE IF EXISTS {0}".format(tbl))
+        cur.close()
+        self.cnx.close()
+
+
+@unittest.skipIf(sys.version_info < (2, 7, 9),
+                 "Python 2.7.9+ is required for SSL")
+class BugOra27434751(tests.MySQLConnectorTests):
+    """BUG#27434751: MYSQL.CONNECTOR HAS NO TLS/SSL OPTION TO VERIFY SERVER NAME
+    """
+    def setUp(self):
+        ssl_ca = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_CA_cert.pem'))
+        ssl_cert = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_client_cert.pem'))
+        ssl_key = os.path.abspath(
+            os.path.join(tests.SSL_DIR, 'tests_client_key.pem'))
+        self.config = tests.get_mysql_config()
+        self.config.pop("unix_socket")
+        self.config["ssl_ca"] = ssl_ca
+        self.config["ssl_cert"] = ssl_cert
+        self.config["ssl_key"] = ssl_key
+        self.config["ssl_verify_cert"] = True
+
+    def _verify_server_name_cnx(self, use_pure=True):
+        config = self.config.copy()
+        config["use_pure"] = use_pure
+        # Setting an invalid host name against a server certificate
+        config["host"] = "127.0.0.1"
+
+        # Should connect with ssl_verify_identity=False
+        config["ssl_verify_identity"] = False
+        cnx = mysql.connector.connect(**config)
+        cnx.close()
+
+        # Should fail to connect with ssl_verify_identity=True
+        config["ssl_verify_identity"] = True
+        self.assertRaises(errors.InterfaceError, mysql.connector.connect,
+                          **config)
+
+        # Should connect with the correct host name and ssl_verify_identity=True
+        config["host"] = "localhost"
+        cnx = mysql.connector.connect(**config)
+        cnx.close()
+
+    def test_verify_server_name_cext_cnx(self):
+        self._verify_server_name_cnx(use_pure=False)
+
+    def test_verify_server_name_pure_cnx(self):
+        self._verify_server_name_cnx(use_pure=True)
